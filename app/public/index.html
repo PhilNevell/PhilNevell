@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Document Anonymizer & Markdown Export</title>
+  <style>
+    :root { --bg: #0f172a; --panel: #111827; --muted: #94a3b8; --text: #e5e7eb; --accent: #38bdf8; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; background: var(--bg); color: var(--text); }
+    header { padding: 16px 24px; border-bottom: 1px solid #1f2937; display: flex; justify-content: space-between; align-items: center; }
+    h1 { font-size: 18px; margin: 0; }
+    .container { max-width: 1100px; margin: 0 auto; padding: 24px; }
+    .grid { display: grid; grid-template-columns: 1fr 380px; gap: 16px; }
+    .panel { background: var(--panel); border: 1px solid #1f2937; border-radius: 12px; padding: 16px; }
+    .dropzone { border: 2px dashed #334155; border-radius: 12px; padding: 24px; text-align: center; color: var(--muted); cursor: pointer; transition: border-color 0.2s; }
+    .dropzone.dragover { border-color: var(--accent); color: var(--accent); }
+    .file-list { margin-top: 12px; max-height: 220px; overflow: auto; border: 1px dashed #334155; border-radius: 8px; padding: 8px; }
+    .file-item { display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid #1f2937; font-size: 14px; }
+    .file-item:last-child { border-bottom: none; }
+    .status { font-size: 12px; color: var(--muted); }
+    .controls label { display: block; font-size: 14px; margin: 10px 0 4px; color: var(--muted); }
+    .controls input[type="text"] { width: 100%; padding: 8px; background: #0b1220; color: var(--text); border: 1px solid #1f2937; border-radius: 8px; }
+    .controls .row { display: flex; gap: 10px; align-items: center; }
+    .controls .row > * { flex: 1; }
+    .btn { appearance: none; border: 1px solid #1f2937; background: #0b1220; color: var(--text); padding: 10px 14px; border-radius: 10px; cursor: pointer; }
+    .btn.primary { background: linear-gradient(45deg, #22d3ee, #3b82f6); border: none; }
+    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+    .pill { display: inline-flex; gap: 6px; align-items: center; padding: 6px 10px; border-radius: 999px; background: #0b1220; border: 1px solid #1f2937; font-size: 12px; color: var(--muted); }
+    .output { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; background: #0b1220; padding: 12px; border-radius: 8px; border: 1px solid #1f2937; max-height: 480px; overflow: auto; }
+    .spacer { height: 12px; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Document Anonymizer & Markdown Export</h1>
+  <div class="pill" id="server-status">Connecting…</div>
+</header>
+<div class="container">
+  <div class="grid">
+    <div class="panel">
+      <div id="dropzone" class="dropzone">
+        <input type="file" id="file-input" multiple style="display:none" accept=".pdf,.docx,.txt,.md,.markdown" />
+        <div><strong>Drop files here</strong> or click to select</div>
+        <div class="status">Accepted: .pdf, .docx, .txt, .md</div>
+      </div>
+      <div class="file-list" id="file-list"></div>
+      <div class="spacer"></div>
+      <div class="row" style="display:flex; gap:8px; align-items:center;">
+        <button class="btn" id="clear-files">Clear</button>
+        <button class="btn" id="process-individual">Process Individually</button>
+        <button class="btn primary" id="process-batch">Process Batch</button>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="controls">
+        <label><input type="checkbox" id="remove-emails" checked /> Remove emails</label>
+        <label>Company names (comma separated)</label>
+        <input type="text" id="company-names" placeholder="e.g. Frontier Group, ACME Ltd" />
+        <label>Key person names (comma separated)</label>
+        <input type="text" id="key-people" placeholder="e.g. Jane Doe, John Smith" />
+      </div>
+      <div class="spacer"></div>
+      <div class="row" style="display:flex; gap:8px; align-items:center;">
+        <button class="btn" id="download-combined" disabled>Download Combined .md</button>
+        <button class="btn" id="download-selected" disabled>Download Selected .md</button>
+      </div>
+      <div class="spacer"></div>
+      <div class="output" id="output-preview">No output yet.</div>
+    </div>
+  </div>
+</div>
+<script>
+  const statusEl = document.getElementById('server-status');
+  fetch('/health').then(r => r.json()).then(() => {
+    statusEl.textContent = 'Server ready';
+  }).catch(() => {
+    statusEl.textContent = 'Server offline';
+  });
+
+  const dropzone = document.getElementById('dropzone');
+  const fileInput = document.getElementById('file-input');
+  const fileList = document.getElementById('file-list');
+  const clearBtn = document.getElementById('clear-files');
+  const processBatchBtn = document.getElementById('process-batch');
+  const processIndividualBtn = document.getElementById('process-individual');
+  const downloadCombinedBtn = document.getElementById('download-combined');
+  const downloadSelectedBtn = document.getElementById('download-selected');
+  const outputPreview = document.getElementById('output-preview');
+
+  const companyNamesInput = document.getElementById('company-names');
+  const keyPeopleInput = document.getElementById('key-people');
+  const removeEmailsInput = document.getElementById('remove-emails');
+
+  let files = [];
+  let lastResponse = null;
+
+  function refreshList() {
+    fileList.innerHTML = '';
+    if (!files.length) {
+      fileList.innerHTML = '<div class="status">No files selected.</div>';
+      return;
+    }
+    files.forEach((f, idx) => {
+      const row = document.createElement('div');
+      row.className = 'file-item';
+      row.innerHTML = `
+        <div>
+          <div>${f.name}</div>
+          <div class="status">${(f.size/1024).toFixed(1)} KB</div>
+        </div>
+        <div>
+          <button class="btn" data-remove="${idx}">Remove</button>
+        </div>
+      `;
+      fileList.appendChild(row);
+    });
+  }
+
+  function addFiles(newFiles) {
+    const allowed = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain', 'text/markdown'];
+    for (const f of newFiles) {
+      if (allowed.includes(f.type) || /\.(pdf|docx|txt|md|markdown)$/i.test(f.name)) {
+        files.push(f);
+      }
+    }
+    refreshList();
+  }
+
+  dropzone.addEventListener('click', () => fileInput.click());
+  dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('dragover'); });
+  dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+  dropzone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropzone.classList.remove('dragover');
+    addFiles(e.dataTransfer.files);
+  });
+  fileInput.addEventListener('change', e => addFiles(e.target.files));
+
+  fileList.addEventListener('click', e => {
+    const btn = e.target.closest('button[data-remove]');
+    if (!btn) return;
+    const idx = Number(btn.getAttribute('data-remove'));
+    files.splice(idx, 1);
+    refreshList();
+  });
+
+  clearBtn.addEventListener('click', () => { files = []; refreshList(); outputPreview.textContent = 'No output yet.'; lastResponse = null; downloadCombinedBtn.disabled = true; downloadSelectedBtn.disabled = true; });
+
+  async function process(mode) {
+    if (!files.length) return;
+    const form = new FormData();
+    files.forEach(f => form.append('files', f));
+    form.append('mode', mode);
+    form.append('removeEmails', removeEmailsInput.checked ? 'true' : 'false');
+    form.append('companyNames', companyNamesInput.value || '');
+    form.append('keyPeople', keyPeopleInput.value || '');
+
+    outputPreview.textContent = 'Processing…';
+
+    const res = await fetch('/api/process', { method: 'POST', body: form });
+    if (!res.ok) {
+      const err = await res.text();
+      outputPreview.textContent = 'Error: ' + err;
+      return;
+    }
+    const data = await res.json();
+    lastResponse = data;
+    if (mode === 'batch') {
+      outputPreview.textContent = data.combinedMarkdown || '';
+      downloadCombinedBtn.disabled = false;
+      downloadSelectedBtn.disabled = false;
+    } else {
+      const first = data.files?.[0];
+      outputPreview.textContent = first ? first.markdown : 'No output.';
+      downloadCombinedBtn.disabled = true;
+      downloadSelectedBtn.disabled = false;
+    }
+  }
+
+  processBatchBtn.addEventListener('click', () => process('batch'));
+  processIndividualBtn.addEventListener('click', () => process('individual'));
+
+  function download(filename, text) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'text/markdown;charset=utf-8' }));
+    a.download = filename;
+    a.click();
+  }
+
+  downloadCombinedBtn.addEventListener('click', () => {
+    if (!lastResponse?.combinedMarkdown) return;
+    download('combined.md', lastResponse.combinedMarkdown);
+  });
+
+  downloadSelectedBtn.addEventListener('click', () => {
+    if (!lastResponse?.files?.length) return;
+    lastResponse.files.forEach(f => download(f.filename.replace(/\.[^.]+$/, '') + '.md', f.markdown));
+  });
+</script>
+</body>
+</html>
